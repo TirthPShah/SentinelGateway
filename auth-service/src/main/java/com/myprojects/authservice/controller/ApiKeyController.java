@@ -3,10 +3,7 @@ package com.myprojects.authservice.controller;
 import com.myprojects.authservice.model.ApiKey;
 import com.myprojects.authservice.service.ApiKeyService;
 import lombok.RequiredArgsConstructor;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
 
@@ -20,5 +17,10 @@ public class ApiKeyController {
     @PostMapping
     public ApiKey generateKey(@RequestParam UUID developerId) {
         return apiKeyService.generateKey(developerId);
+    }
+
+    @GetMapping("/validate")
+    public boolean validateKey(@RequestParam String key) {
+        return apiKeyService.validateKey(key);
     }
 }

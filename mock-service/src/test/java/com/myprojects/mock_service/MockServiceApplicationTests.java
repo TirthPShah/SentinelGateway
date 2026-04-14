@@ -1,10 +1,10 @@
-package com.myprojects.apigateway;
+package com.myprojects.mock_service;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
-class ApigatewayApplicationTests {
+class MockServiceApplicationTests {
 
 	@Test
 	void contextLoads() {
