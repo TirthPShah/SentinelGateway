@@ -1,5 +1,7 @@
 package com.myprojects.api_gateway.filter;
 
+import com.myprojects.api_gateway.model.ApiEvent;
+import com.myprojects.api_gateway.service.IpRateLimiterService;
 import com.myprojects.api_gateway.service.KafkaProducerService;
 import com.myprojects.api_gateway.service.RateLimiterService;
 import lombok.RequiredArgsConstructor;
@@ -8,6 +10,8 @@ import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFac
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Mono;
 
 @Component
 @RequiredArgsConstructor
@@ -16,6 +20,7 @@ public class ApiKeyGatewayFilter extends AbstractGatewayFilterFactory<Object> {
     private final WebClient.Builder webClientBuilder;
     private final RateLimiterService rateLimiterService;
     private final KafkaProducerService kafkaProducerService;
+    private final IpRateLimiterService ipRateLimiterService;
 
     public static class Config {}
 
@@ -29,20 +34,22 @@ public class ApiKeyGatewayFilter extends AbstractGatewayFilterFactory<Object> {
                 return chain.filter(exchange);
             }
 
+            long startTime = System.currentTimeMillis();
+
+            String ip = getClientIp(exchange);
+            String method = exchange.getRequest().getMethod().name();
             String apiKey = exchange.getRequest().getHeaders().getFirst("x-api-key");
 
-            if(apiKey == null) {
-                kafkaProducerService.sendEvent("{ \"error\": \"missing_api_key\" }");
-                exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-                return exchange.getResponse().setComplete();
-            }
+            // IP Rate Limiting
+            return ipRateLimiterService.isAllowed(ip)
+                    .flatMap(ipAllowed -> {
 
-            return rateLimiterService.isAllowed(apiKey)
-                    .flatMap(allowed -> {
+                        if(!ipAllowed){
+                            return reject(exchange, apiKey, path, method, 429, System.currentTimeMillis(), "ip_rate_limited");
+                        }
 
-                        if(!allowed) {
-                            exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
-                            return exchange.getResponse().setComplete();
+                        if(apiKey == null || apiKey.isBlank()) {
+                            return reject(exchange, null, path, method, 401, System.currentTimeMillis(), "missing_api_key");
                         }
 
                         return webClientBuilder.build()
@@ -53,20 +60,67 @@ public class ApiKeyGatewayFilter extends AbstractGatewayFilterFactory<Object> {
                                 .flatMap(valid -> {
 
                                     if(!valid) {
-                                        exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-                                        return exchange.getResponse().setComplete();
+                                        return reject(exchange, apiKey, path, method, 401, System.currentTimeMillis(), "invalid_api_key");
                                     }
 
-                                    String event = String.format(
-                                            "{ \"path\": \"%s\", \"apiKey\": \"%s\" }",
-                                            path, apiKey
-                                    );
+                                    // API Key Rate Limiting
+                                    return rateLimiterService.isAllowed(apiKey)
+                                            .flatMap(allowed -> {
 
-                                    kafkaProducerService.sendEvent(event);
+                                                if(!allowed) {
+                                                    return reject(exchange, apiKey, path, method, 429, System.currentTimeMillis(), "api_rate_limited");
+                                                }
 
-                                    return chain.filter(exchange);
+                                                long latency = System.currentTimeMillis() - startTime;
+
+                                                kafkaProducerService.sendEvent(ApiEvent.builder()
+                                                        .apiKey(apiKey)
+                                                        .path(path)
+                                                        .method(method)
+                                                        .status(200)
+                                                        .timestamp(System.currentTimeMillis())
+                                                        .latency(latency)
+                                                        .message("success")
+                                                        .build()
+                                                );
+
+                                                return chain.filter(exchange);
+                                            });
                                 });
                     });
         };
+    }
+
+    private Mono<Void> reject(ServerWebExchange exchange,
+                              String apiKey,
+                              String path,
+                              String method,
+                              int status,
+                              long startTime,
+                              String message) {
+
+        long latency = System.currentTimeMillis() - startTime;
+
+        kafkaProducerService.sendEvent(ApiEvent.builder()
+                .apiKey(apiKey)
+                .path(path)
+                .method(method)
+                .status(status)
+                .timestamp(System.currentTimeMillis())
+                .latency(latency)
+                .message(message)
+                .build()
+        );
+
+        exchange.getResponse().setStatusCode(HttpStatus.valueOf(status));
+        return exchange.getResponse().setComplete();
+    }
+
+    private String getClientIp(ServerWebExchange exchange) {
+        String xForwarded = exchange.getRequest().getHeaders().getFirst("x-forwarded-for");
+        if(xForwarded != null) {
+            return xForwarded.split(",")[0];
+        }
+        return exchange.getRequest().getRemoteAddress().getAddress().getHostAddress();
     }
 }
