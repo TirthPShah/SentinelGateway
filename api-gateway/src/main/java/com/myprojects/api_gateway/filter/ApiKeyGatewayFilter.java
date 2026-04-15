@@ -1,5 +1,6 @@
 package com.myprojects.api_gateway.filter;
 
+import com.myprojects.api_gateway.service.KafkaProducerService;
 import com.myprojects.api_gateway.service.RateLimiterService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
@@ -14,6 +15,7 @@ public class ApiKeyGatewayFilter extends AbstractGatewayFilterFactory<Object> {
 
     private final WebClient.Builder webClientBuilder;
     private final RateLimiterService rateLimiterService;
+    private final KafkaProducerService kafkaProducerService;
 
     public static class Config {}
 
@@ -30,6 +32,7 @@ public class ApiKeyGatewayFilter extends AbstractGatewayFilterFactory<Object> {
             String apiKey = exchange.getRequest().getHeaders().getFirst("x-api-key");
 
             if(apiKey == null) {
+                kafkaProducerService.sendEvent("{ \"error\": \"missing_api_key\" }");
                 exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
                 return exchange.getResponse().setComplete();
             }
@@ -53,6 +56,13 @@ public class ApiKeyGatewayFilter extends AbstractGatewayFilterFactory<Object> {
                                         exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
                                         return exchange.getResponse().setComplete();
                                     }
+
+                                    String event = String.format(
+                                            "{ \"path\": \"%s\", \"apiKey\": \"%s\" }",
+                                            path, apiKey
+                                    );
+
+                                    kafkaProducerService.sendEvent(event);
 
                                     return chain.filter(exchange);
                                 });
